@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { FiSearch, FiTrash2, FiRefreshCw, FiUsers, FiList } from "react-icons/fi";
+import { FiSearch, FiTrash2, FiRefreshCw, FiUsers, FiList, FiFileText } from "react-icons/fi";
 import CreateInviteModal from "./components/CreateInviteModal";
 
 type User = {
@@ -24,15 +24,27 @@ type UserLog = {
   createdAt: string;
 };
 
+type UserProfile = {
+  id: string;
+  companyName: string;
+  fullName: string;
+  city: string;
+  country: string;
+  createdAt: string;
+};
+
 export default function UserManagementPage() {
-  const [view, setView] = useState<"users" | "logs">("users");
+  const [view, setView] = useState<"users" | "logs" | "profiles">("users");
   const [users, setUsers] = useState<User[]>([]);
   const [logs, setLogs] = useState<UserLog[]>([]);
+  const [profiles, setProfiles] = useState<UserProfile[]>([]);
   const [search, setSearch] = useState("");
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [loadingLogs, setLoadingLogs] = useState(false);
+  const [loadingProfiles, setLoadingProfiles] = useState(false);
   const [errorUsers, setErrorUsers] = useState<string | null>(null);
   const [errorLogs, setErrorLogs] = useState<string | null>(null);
+  const [errorProfiles, setErrorProfiles] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   const API_BASE = "http://localhost:3001";
@@ -67,15 +79,31 @@ export default function UserManagementPage() {
     }
   }, []);
 
+  const fetchProfiles = useCallback(async () => {
+    setLoadingProfiles(true);
+    setErrorProfiles(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/subscription-profiles`);
+      if (!res.ok) throw new Error(`Failed to fetch profiles (${res.status})`);
+      const data: UserProfile[] = await res.json();
+      setProfiles(data);
+    } catch (err: any) {
+      setErrorProfiles(err.message || "Failed to fetch profiles");
+    } finally {
+      setLoadingProfiles(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchUsers();
     fetchLogs();
+    fetchProfiles();
     let iv: NodeJS.Timeout | null = null;
     if (view === "logs") {
       iv = setInterval(fetchLogs, 10_000);
     }
     return () => iv && clearInterval(iv);
-  }, [fetchUsers, fetchLogs, view]);
+  }, [fetchUsers, fetchLogs, fetchProfiles, view]);
 
   const handleDeleteUser = async (id: string) => {
     if (!confirm("Are you sure you want to delete this user?")) return;
@@ -107,6 +135,16 @@ export default function UserManagementPage() {
     return (log.username?.toLowerCase().includes(q) ?? false) || log.action.toLowerCase().includes(q);
   });
 
+  const filteredProfiles = profiles.filter((profile) => {
+    const q = search.toLowerCase();
+    return (
+      profile.companyName.toLowerCase().includes(q) ||
+      profile.fullName.toLowerCase().includes(q) ||
+      profile.city.toLowerCase().includes(q) ||
+      profile.country.toLowerCase().includes(q)
+    );
+  });
+
   return (
     <div className="min-h-screen bg-[#0D1B2A] text-white flex">
       {/* Sidebar */}
@@ -114,33 +152,44 @@ export default function UserManagementPage() {
         <h2 className="text-lg font-semibold mb-4">Management</h2>
 
         <button
-          className={`flex items-center gap-2 px-3 py-2 rounded font-medium text-sm ${
-            view === "users" ? "bg-[#1E4DB7]" : "hover:bg-[#1E3C72]"
-          }`}
-          onClick={() => setView("users")}
-          aria-label="User Management"
-        >
-          <FiUsers size={18} />
-          User Management
-        </button>
+  className={`flex items-center gap-2 px-3 py-2 rounded font-medium text-sm ${
+    view === "users" ? "bg-[#1E4DB7]" : "hover:bg-[#1E3C72]"
+  }`}
+  onClick={() => setView("users")}
+  aria-label="User Management"
+>
+  <FiUsers size={18} />
+  User Management
+</button>
 
-        <button
-          className={`flex items-center gap-2 px-3 py-2 rounded font-medium text-sm ${
-            view === "logs" ? "bg-[#1E4DB7]" : "hover:bg-[#1E3C72]"
-          }`}
-          onClick={() => setView("logs")}
-          aria-label="Log Management"
-        >
-          <FiList size={18} />
-          Log Management
-        </button>
+<button
+  className={`flex items-center gap-2 px-3 py-2 rounded font-medium text-sm ${
+    view === "logs" ? "bg-[#1E4DB7]" : "hover:bg-[#1E3C72]"
+  }`}
+  onClick={() => setView("logs")}
+>
+  <FiList size={18} />
+  Log Management
+</button>
+
+<button
+  className={`flex items-center gap-2 px-3 py-2 rounded font-medium text-sm ${
+    view === "profiles" ? "bg-[#1E4DB7]" : "hover:bg-[#1E3C72]"
+  }`}
+  onClick={() => setView("profiles")}
+  aria-label="Data Diri"
+>
+  <FiFileText size={18} />
+  Data Diri
+</button>
+
       </nav>
 
       {/* Main content */}
       <main className="flex-1 p-6 overflow-auto">
         <header className="flex items-center justify-between mb-4 flex-wrap gap-2">
           <h1 className="text-xl font-semibold">
-            {view === "users" ? "User Management" : "User Logs"}
+            {view === "users" ? "User Management" : view === "logs" ? "User Logs" : "Data Diri"}
           </h1>
 
           {view === "users" && (
@@ -156,6 +205,7 @@ export default function UserManagementPage() {
                 onClick={() => {
                   fetchUsers();
                   fetchLogs();
+                  fetchProfiles();
                 }}
                 title="Refresh"
                 className="bg-[#132132] p-2 rounded"
@@ -174,13 +224,23 @@ export default function UserManagementPage() {
               <FiRefreshCw />
             </button>
           )}
+
+          {view === "profiles" && (
+            <button
+              onClick={() => fetchProfiles()}
+              title="Refresh Profiles"
+              className="bg-[#132132] p-2 rounded"
+            >
+              <FiRefreshCw />
+            </button>
+          )}
         </header>
 
         {/* Search bar */}
         <div className="mb-4 max-w-md">
           <input
             type="text"
-            placeholder={`Search ${view === "users" ? "users" : "logs"}...`}
+            placeholder={`Search ${view === "users" ? "users" : view === "logs" ? "logs" : "profiles"}...`}
             className="w-full rounded px-3 py-2 bg-[#132132] placeholder-gray-400 text-white outline-none text-sm"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -296,6 +356,56 @@ export default function UserManagementPage() {
                           {log.createdAt
                             ? new Date(log.createdAt).toLocaleString()
                             : "-"}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {view === "profiles" && (
+          <div className="overflow-auto rounded-lg border border-[#1C2C3A] bg-[#0C1A2A]">
+            {errorProfiles ? (
+              <div className="p-4 text-red-400">Error: {errorProfiles}</div>
+            ) : (
+              <table className="min-w-full text-sm">
+                <thead className="bg-[#030E1C] text-white sticky top-0">
+                  <tr>
+                    <th className="px-4 py-2 text-left">Company</th>
+                    <th className="px-4 py-2 text-left">Full Name</th>
+                    <th className="px-4 py-2 text-left">City</th>
+                    <th className="px-4 py-2 text-left">Country</th>
+                    <th className="px-4 py-2 text-left">Created At</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-[#0C1A2A]">
+                  {loadingProfiles ? (
+                    <tr>
+                      <td colSpan={5} className="py-8 text-center text-gray-400 italic">
+                        Loading profiles...
+                      </td>
+                    </tr>
+                  ) : filteredProfiles.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="py-8 text-center text-gray-400 italic">
+                        No profiles found.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredProfiles.map((p) => (
+                      <tr
+                        key={p.id}
+                        className="border-t border-[#1C2C3A] hover:bg-[#334155]"
+                      >
+                        <td className="px-4 py-2">{p.companyName}</td>
+                        <td className="px-4 py-2">{p.fullName}</td>
+                        <td className="px-4 py-2">{p.city}</td>
+                        <td className="px-4 py-2">{p.country}</td>
+                        <td className="px-4 py-2">
+                          {p.createdAt ? new Date(p.createdAt).toLocaleString() : "-"}
                         </td>
                       </tr>
                     ))

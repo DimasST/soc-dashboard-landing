@@ -16,11 +16,32 @@ model User {
   role            String     @default("user")
   isActivated     Boolean    @default(false)
   activationToken String?
-  isTrial         Boolean  @default(false) 
+  activationTime             DateTime?
+  isTrial         Boolean    @default(false)
+  // ⬇️ Durasi langganan aktif setelah aktivasi (menit). Contoh: 30 menit
+  subscriptionDurationMinutes Int?
+
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
 
-  logs            UserLog[]  // Relasi ke UserLog
+  logs            UserLog[]
+  // Relasi ke SubscriptionProfile (opsional, 1 user bisa tercatat dari 1 profil pendaftaran)
+  subscriptionProfiles SubscriptionProfile[]
+}
+
+model SubscriptionProfile {
+  id           String   @id @default(cuid())
+  plan         String
+  price        Int      // simpen sebagai integer (misal dalam USD tanpa desimal). Kalau mau decimal: Decimal @db.Decimal(10,2)
+  companyName  String
+  fullName     String
+  city         String
+  country      String
+  createdAt    DateTime @default(now())
+
+  // Akan terisi setelah invite sukses (user dibuat)
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id])
 }
 
 model sensors {
@@ -44,7 +65,7 @@ model sensor_logs {
 
 model UserLog {
   id        Int      @id @default(autoincrement())
-  userId    String?  
+  userId    String?
   username  String?
   action    String
   ip        String?
@@ -52,4 +73,13 @@ model UserLog {
   createdAt DateTime @default(now())
 
   user      User?    @relation(fields: [userId], references: [id])
+}
+
+model Device {
+  id        String   @id @default(cuid())
+  prtgId    String?  // objid dari PRTG (boleh null kalau manual tambah device)
+  name      String
+  type      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

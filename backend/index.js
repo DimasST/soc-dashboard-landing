@@ -8,6 +8,7 @@ import slaLogsRoutes from "./api/sla-logs/route.js";
 import axios from "axios";
 import bodyParser from "body-parser";
 import "dotenv/config";
+import qs from "qs"; // untuk format x-www-form-urlencoded
 
 dotenv.config();
 
@@ -44,7 +45,6 @@ async function sendEmail({ to, subject, html }) {
   }
 }
 
-
 // ====== KONFIGURASI PRTG ======
 const PRTG_HOST = process.env.PRTG_HOST; // contoh: http://127.0.0.1
 const PRTG_USERNAME = process.env.PRTG_USERNAME;
@@ -53,28 +53,71 @@ const PRTG_PASSHASH = process.env.PRTG_PASSHASH;
 /* ==================== DEVICE CRUD & GROUP ==================== */
 
 // Add device
+// Add device
 app.post("/api/devices", async (req, res) => {
+  console.log("Request body:", req.body);
   const { name, host, parentId } = req.body;
+
   if (!name || !host || !parentId) {
-    return res.status(400).json({ error: "Name, Host, dan Parent Group ID wajib diisi" });
+    return res
+      .status(400)
+      .json({ error: "Name, Host, dan Parent Group ID wajib diisi" });
   }
+
   try {
     const url = `${PRTG_HOST}/api/adddevice.htm`;
+
+    // 🔑 FE kirim "host", BE forward ke PRTG pakai "host_"
     const params = {
-      name: name.trim(),
-      host: host.trim(),
       id: parentId.trim(),
+      name: name.trim(),
+      host_: host.trim(),
       username: PRTG_USERNAME,
       passhash: PRTG_PASSHASH,
     };
-    const response = await axios.get(url, { params });
-    if (response.data.includes("<error>")) {
-      return res.status(400).json({ error: response.data });
+
+    console.log("Forwarding params to PRTG:", params);
+
+    // Kirim sebagai POST form data ke PRTG
+    const response = await axios.post(url, qs.stringify(params), {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    });
+
+    const data = response.data;
+
+    // Cek kalau ada error dari PRTG
+    if (typeof data === "string" && data.includes("<error>")) {
+      console.error("PRTG Error Response:", data);
+      return res.status(400).json({ error: "PRTG Error: " + data });
     }
-    res.json({ success: true, result: response.data });
+
+    // Ambil objectid hasil create
+    let objectId = null;
+    const match = data.match(/<objectid>(\d+)<\/objectid>/);
+    if (match) objectId = match[1];
+
+    // Simpan ke DB (tetap pakai field host)
+    const device = await prisma.device.create({
+      data: {
+        name: name.trim(),
+        host: host.trim(), // ✅ tetap "host" di DB
+        prtgId: objectId,
+      },
+    });
+
+    res.json({
+      success: true,
+      message: "Device added successfully",
+      prtgId: objectId,
+      device,
+    });
   } catch (error) {
-    console.error("Error adding device:", error.message);
-    res.status(500).json({ error: "Failed to add device: " + error.message });
+    console.error("Error adding device:", error.response?.data || error.message);
+    res.status(500).json({
+      error:
+        "Failed to add device: " +
+        (error.response?.data || error.message),
+    });
   }
 });
 
@@ -167,7 +210,7 @@ app.post("/login", async (req, res) => {
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) return res.status(401).json({ error: "Invalid credentials" });
 
-    await prisma.UserLog.create({
+    await prisma.userLog.create({
       data: {
         userId: user.id,
         username: user.username || "",
@@ -196,7 +239,7 @@ app.post("/logout", async (req, res) => {
     if (!userId || !username) {
       return res.status(400).json({ error: "User ID and username are required" });
     }
-    await prisma.UserLog.create({
+    await prisma.userLog.create({
       data: {
         userId,
         username,
@@ -245,7 +288,7 @@ app.delete("/api/user/:id", async (req, res) => {
   }
 });
 
-/* ==================== INVITATION ==================== */
+/* ==================== INVITATION & ACTIVATION ==================== */
 app.post("/api/invitation", async (req, res) => {
   const { email, role } = req.body;
   if (!email || !role) return res.status(400).json({ error: "Email and role are required" });
@@ -254,70 +297,50 @@ app.post("/api/invitation", async (req, res) => {
     if (existing) return res.status(400).json({ error: "Email already invited" });
 
     const token = Math.random().toString(36).substring(2) + Date.now().toString(36);
-    await prisma.user.create({
-      data: { email, role, isActivated: false, activationToken: token },
-    });
+    await prisma.user.create({ data: { email, role, isActivated: false, activationToken: token } });
 
     const activationLink = `http://localhost:3000/activate`;
-    await sendEmail({
-      to: email,
-      subject: "You're Invited to SOC Dashboard",
-      html: `
-        <p>Hello,</p>
-        <p>You have been invited to SOC Dashboard as <strong>${role}</strong>.</p>
-        <p>Please open the activation page at:</p>
-        <p><a href="${activationLink}">${activationLink}</a></p>
-        <p>And use the following token to activate your account:</p>
-        <p style="font-size: 18px;"><code>${token}</code></p>
-        <p>This token is valid until used.</p>
-      `,
-    });
+    await sendEmail({ to: email, subject: "You're Invited to SOC Dashboard", html: `<p>Hello,</p><p>You have been invited as <strong>${role}</strong>.</p><p>Activation page: <a href="${activationLink}">${activationLink}</a></p><p>Token: <b>${token}</b></p>` });
 
-    res.status(200).json({ success: true, message: "Invitation sent successfully" });
+    res.status(200).json({ success: true, message: "Invitation sent successfully", token });
   } catch (error) {
     console.error("Invitation error:", error);
     res.status(500).json({ error: "Failed to send invitation" });
   }
 });
 
-/* ==================== ACTIVATION ==================== */
 app.post("/api/activate", async (req, res) => {
   const { token, username, password, name } = req.body;
-  if (!token || !username || !password || !name)
-    return res.status(400).json({ error: "All fields are required" });
+  if (!token || !username || !password || !name) return res.status(400).json({ error: "All fields are required" });
 
   try {
-    const user = await prisma.user.findFirst({
-      where: { activationToken: token, isActivated: false },
-    });
+    const user = await prisma.user.findFirst({ where: { activationToken: token, isActivated: false } });
     if (!user) return res.status(400).json({ error: "Invalid or expired token" });
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        username,
-        name,
-        password: hashedPassword,
-        isActivated: true,
-        activationToken: null,
-      },
-    });
+    const updated = await prisma.user.update({ where: { id: user.id }, data: { username, name, password: hashedPassword, isActivated: true, activationToken: null } });
 
+    // ✅ Free trial (5 menit)
     if (user.isTrial) {
       setTimeout(async () => {
         try {
-          await prisma.user.update({
-            where: { id: user.id },
-            data: { isActivated: false },
-          });
+          await prisma.user.update({ where: { id: user.id }, data: { isActivated: false } });
           console.log(`⏳ Trial expired for ${user.email}`);
-        } catch (err) {
-          console.error(`Error expiring trial for ${user.email}:`, err);
-        }
+        } catch (err) { console.error(err); }
       }, 5 * 60 * 1000);
     }
-    res.json({ success: true });
+
+    // ✅ Subscription (30 menit atau sesuai subscriptionDurationMinutes)
+    if (!user.isTrial && user.subscriptionDurationMinutes) {
+      setTimeout(async () => {
+        try {
+          await prisma.user.update({ where: { id: user.id }, data: { isActivated: false } });
+          console.log(`⏳ Subscription expired for ${user.email}`);
+        } catch (err) { console.error(err); }
+      }, user.subscriptionDurationMinutes * 60 * 1000);
+    }
+
+    res.json({ success: true, user: { id: updated.id } });
   } catch (error) {
     console.error("Activation error:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -348,7 +371,7 @@ app.get("/api/sensor_logs", async (req, res) => {
 /* ==================== USER LOGS ==================== */
 app.get("/api/user-logs", async (req, res) => {
   try {
-    const logs = await prisma.UserLog.findMany({
+    const logs = await prisma.userLog.findMany({
       orderBy: { createdAt: "desc" },
     });
     res.json(logs);
@@ -360,6 +383,191 @@ app.get("/api/user-logs", async (req, res) => {
 
 /* ==================== SLA LOGS ==================== */
 app.use("/api/sla-logs", slaLogsRoutes);
+
+/* =========== NEW: PAYMENT FLOW (profile → invite + invoice) =========== */
+
+/**
+ * 1) Simpan data diri pendaftar (tanpa email). Frontend akan lanjut ke step bayar dummy → input email.
+ * Body: { plan, price, companyName, fullName, city, country }
+ * Return: { profileId }
+ */
+app.post("/api/payment/profile", async (req, res) => {
+  try {
+    const { plan, price, companyName, fullName, city, country } = req.body;
+    if (!plan || price == null || !companyName || !fullName || !city || !country) {
+      return res.status(400).json({ error: "Semua field profil wajib diisi" });
+    }
+
+    const profile = await prisma.subscriptionProfile.create({
+      data: {
+        plan: String(plan),
+        price: parseInt(price, 10),
+        companyName,
+        fullName,
+        city,
+        country,
+      },
+      select: { id: true },
+    });
+
+    res.json({ success: true, profileId: profile.id });
+  } catch (error) {
+    console.error("Payment profile error:", error);
+    res.status(500).json({ error: "Failed to create payment profile" });
+  }
+});
+
+/**
+ * 2) Setelah bayar dummy, user masukkan email untuk undangan admin.
+ * Body: { profileId, email, role }  (role biasanya "admin")
+ * - Buat user (cek email unik)
+ * - Set user.subscriptionDurationMinutes = 30 (sesuai requirement)
+ * - Update SubscriptionProfile.userId
+ * - Kirim email undangan + email invoice dummy (menggunakan data profile)
+ * Return: { token }
+ */
+app.post("/api/payment/invite", async (req, res) => {
+  try {
+    const { profileId, email, role } = req.body;
+    if (!profileId || !email || !role) {
+      return res.status(400).json({ error: "profileId, email, dan role wajib diisi" });
+    }
+
+    const profile = await prisma.subscriptionProfile.findUnique({ where: { id: profileId } });
+    if (!profile) return res.status(404).json({ error: "Payment profile tidak ditemukan" });
+
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) return res.status(400).json({ error: "Email already registered" });
+
+    const token = Math.random().toString(36).substring(2) + Date.now().toString(36);
+
+    const user = await prisma.user.create({
+      data: {
+        email,
+        role,
+        isActivated: false,
+        activationToken: token,
+        isTrial: false,
+        subscriptionDurationMinutes: 30, // ⬅️ 30 menit aktif setelah aktivasi
+      },
+    });
+
+    // Link aktivasi
+    const activationLink = `http://localhost:3000/activate`;
+
+    // Email undangan (aktivasi)
+    await sendEmail({
+      to: email,
+      subject: "Payment Success - Activate Your SOC Dashboard Account",
+      html: `
+        <h2>Thank you for your payment!</h2>
+        <p>Your account is almost ready. Please activate it using the token below:</p>
+        <p><a href="${activationLink}">${activationLink}</a></p>
+        <p><b>Activation Token:</b> ${token}</p>
+        <p><i>Note:</i> Setelah aktivasi, akun akan aktif <b>30 menit</b> kemudian otomatis menjadi <b>Inactive</b>.</p>
+      `,
+    });
+
+    // Email invoice dummy (mengambil data dari profile)
+    const invoiceNo = `INV-${Date.now()}`;
+    const issuedAt = new Date().toLocaleString();
+
+    await sendEmail({
+      to: email,
+      subject: `Invoice ${invoiceNo} - SOC Dashboard`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 640px; margin: 0 auto; border: 1px solid #eee; padding: 16px;">
+          <h2 style="margin:0 0 8px 0;">Invoice (Dummy)</h2>
+          <p style="margin:0 0 16px 0; color:#555;">${issuedAt}</p>
+          <hr/>
+          <h3 style="margin:16px 0 8px 0;">Billing To</h3>
+          <table style="width:100%; border-collapse: collapse;">
+            <tr><td style="padding:4px 0;"><b>Company</b></td><td>${profile.companyName}</td></tr>
+            <tr><td style="padding:4px 0;"><b>Full Name</b></td><td>${profile.fullName}</td></tr>
+            <tr><td style="padding:4px 0;"><b>City</b></td><td>${profile.city}</td></tr>
+            <tr><td style="padding:4px 0;"><b>Country</b></td><td>${profile.country}</td></tr>
+          </table>
+          <h3 style="margin:16px 0 8px 0;">Order</h3>
+          <table style="width:100%; border-collapse: collapse;">
+            <tr><td style="padding:4px 0;"><b>Plan</b></td><td>${profile.plan}</td></tr>
+            <tr><td style="padding:4px 0;"><b>Price</b></td><td>$${profile.price}</td></tr>
+            <tr><td style="padding:4px 0;"><b>Invoice No.</b></td><td>${invoiceNo}</td></tr>
+            <tr><td style="padding:4px 0;"><b>Status</b></td><td>Paid (Dummy)</td></tr>
+          </table>
+          <hr/>
+          <p style="color:#777;">Ini adalah invoice simulasi untuk keperluan demo.</p>
+        </div>
+      `,
+    });
+
+    // Link-kan profile ke user yang diundang
+    await prisma.subscriptionProfile.update({
+      where: { id: profileId },
+      data: { userId: user.id },
+    });
+
+    res.json({ success: true, message: "Invitation + invoice sent", token });
+  } catch (error) {
+    console.error("Payment invite error:", error);
+    res.status(500).json({ error: "Failed to process invitation" });
+  }
+});
+
+
+/* ==================== SUBSCRIPTION PROFILE ==================== */
+
+// Get all subscription profiles
+app.get("/api/subscription-profiles", async (req, res) => {
+  try {
+    const profiles = await prisma.subscriptionProfile.findMany({
+      include: {
+        user: {
+          select: {
+            id: true,
+            email: true,
+            username: true,
+            role: true,
+            isActivated: true,
+          },
+        },
+      },
+    });
+    res.json(profiles);
+  } catch (error) {
+    console.error("Error fetching subscription profiles:", error);
+    res.status(500).json({ error: "Failed to fetch subscription profiles" });
+  }
+});
+
+// Get single subscription profile by ID
+app.get("/api/subscription-profiles/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const profile = await prisma.subscriptionProfile.findUnique({
+      where: { id },
+      include: {
+        user: {
+          select: {
+            id: true,
+            email: true,
+            username: true,
+            role: true,
+            isActivated: true,
+          },
+        },
+      },
+    });
+
+    if (!profile) {
+      return res.status(404).json({ error: "Subscription profile not found" });
+    }
+
+    res.json(profile);
+  } catch (error) {
+    console.error("Error fetching subscription profile:", error);
+    res.status(500).json({ error: "Failed to fetch subscription profile" });
+  }
+});
 
 /* ==================== FREE TRIAL ==================== */
 app.post("/api/free-trial", async (req, res) => {
@@ -402,59 +610,7 @@ app.post("/api/free-trial", async (req, res) => {
   }
 });
 
-/* ==================== DUMMY PAYMENT + INVITATION ==================== */
-app.post("/api/payment", async (req, res) => {
-  const { email, role } = req.body;
-  if (!email || !role) {
-    return res.status(400).json({ error: "Email and role are required" });
-  }
 
-  try {
-    console.log(`💳 Processing payment for ${email}...`);
-    // Simulasi pembayaran sukses
-    const paymentSuccess = true;
-
-    if (!paymentSuccess) {
-      return res.status(400).json({ error: "Payment failed" });
-    }
-
-    console.log(`✅ Payment successful for ${email}`);
-
-    // Lanjut buat invitation
-    const existing = await prisma.user.findUnique({ where: { email } });
-    if (existing) {
-      return res.status(400).json({ error: "Email already registered" });
-    }
-
-    const token = Math.random().toString(36).substring(2) + Date.now().toString(36);
-    await prisma.user.create({
-      data: {
-        email,
-        role,
-        isActivated: false,
-        activationToken: token,
-        isTrial: false, // karena ini pembayaran beneran
-      },
-    });
-
-    const activationLink = `http://localhost:3000/activate`;
-    await sendEmail({
-      to: email,
-      subject: "Payment Success - Activate Your SOC Dashboard Account",
-      html: `
-        <h2>Thank you for your payment!</h2>
-        <p>Your account is almost ready. Please activate it using the token below:</p>
-        <p><a href="${activationLink}">${activationLink}</a></p>
-        <p><b>Activation Token:</b> ${token}</p>
-      `,
-    });
-
-    res.json({ success: true, message: "Payment successful, invitation sent" });
-  } catch (error) {
-    console.error("Payment error:", error);
-    res.status(500).json({ error: "Payment processing failed" });
-  }
-});
 
 /* ==================== START SERVER ==================== */
 app.listen(PORT, () => {

@@ -47,21 +47,23 @@ export default function DevicePage() {
 
   const handleAddDevice = async (deviceName: string, host: string, parentId: string) => {
     try {
-      const res = await fetch('http://localhost:3001/api/devices', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const res = await fetch("http://localhost:3001/api/devices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: deviceName, host, parentId }),
       });
-
+  
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to add device');
-
+      if (!res.ok) throw new Error(data.error || "Failed to add device");
+  
+      alert("✅ Device berhasil ditambahkan (ID: " + data.objectId + ")");
       setShowForm(false);
       await fetchDevices();
     } catch (e: any) {
-      alert('Error adding device: ' + e.message);
+      alert("Error adding device: " + e.message);
     }
   };
+  
 
   const handleDeleteDevice = async (objid: string) => {
     if (!confirm('Delete this device?')) return;
